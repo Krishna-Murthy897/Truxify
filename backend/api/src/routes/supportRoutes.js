@@ -107,7 +107,6 @@ import { formatPaginationMeta } from '../utils/pagination.js';
 const router = express.Router();
 router.use(userLimiter);
 
-const adminDb = supabaseAdmin || supabase;
 // support_tickets / support_ticket_comments are authenticated/service-role
 // only (RLS policies + revoke_anon_privileges.sql revoke anon access), so the
 // anon-key client resolves every read to empty and every write to a denial.
@@ -390,7 +389,6 @@ router.get('/tickets', authenticate, userLimiter, async (req, res) => {
     });
   } catch (err) {
     logger.error("[SupportRoutes] Error:", err?.message || err);
-    res.status
     res.status(500).json({ error: err?.message || "Internal Server Error" });
   }
 });
@@ -398,34 +396,6 @@ router.get('/tickets', authenticate, userLimiter, async (req, res) => {
 // ============================================================================
 // 5. GET SINGLE SUPPORT TICKET (AUTHENTICATED USER - OWNER)
 // ============================================================================
-/**
- * @openapi
- * /api/support/tickets/{id}:
- *   get:
- *     tags: [Support]
- *     summary: Get a single support ticket
- *     description: Returns details of a specific support ticket. Only the ticket owner or admin can access.
- *     security:
- *       - BearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: string
- *           format: uuid
- *     responses:
- *       200:
- *         description: Ticket details
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *       403:
- *         description: Access denied
- *       404:
- *         description: Ticket not found
- */
 router.get('/tickets/:id', authenticate, userLimiter, requirePolicy('ticket:view', async (req) => {
   const { data: ticket } = await userDb(req)
     .from('support_tickets')
@@ -464,42 +434,6 @@ router.get('/tickets/:id', authenticate, userLimiter, requirePolicy('ticket:view
 // ============================================================================
 // 6. UPDATE SUPPORT TICKET (AUTHENTICATED USER - OWNER OR ADMIN)
 // ============================================================================
-/**
- * @openapi
- * /api/support/tickets/{id}:
- *   patch:
- *     tags: [Support]
- *     summary: Update a support ticket
- *     description: Updates a support ticket's subject, description, category, or status. Only ticket owner or admin can update. Non-admin users can only change status to 'closed'.
- *     security:
- *       - BearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: string
- *           format: uuid
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             $ref: '#/components/schemas/UpdateTicketRequest'
- *     responses:
- *       200:
- *         description: Ticket updated
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/TicketResponse'
- *       400:
- *         description: Cannot update closed ticket
- *       403:
- *         description: Access denied
- *       404:
- *         description: Ticket not found
- */
 router.patch('/tickets/:id', authenticate, userLimiter, requirePolicy('ticket:update', async (req) => {
   const { data: ticket } = await userDb(req)
     .from('support_tickets')
@@ -607,49 +541,6 @@ router.patch('/tickets/:id', authenticate, userLimiter, requirePolicy('ticket:up
 // ============================================================================
 // 7. LIST ALL TICKETS (ADMIN ONLY)
 // ============================================================================
-/**
- * @openapi
- * /api/support/admin/tickets:
- *   get:
- *     tags: [Support]
- *     summary: List all tickets (Admin)
- *     description: Returns all support tickets with optional filters by status, category, and user. Admin role required.
- *     security:
- *       - BearerAuth: []
- *     parameters:
- *       - in: query
- *         name: status
- *         schema:
- *           type: string
- *       - in: query
- *         name: category
- *         schema:
- *           type: string
- *       - in: query
- *         name: user_id
- *         schema:
- *           type: string
- *           format: uuid
- *       - in: query
- *         name: page
- *         schema:
- *           type: integer
- *           default: 1
- *       - in: query
- *         name: limit
- *         schema:
- *           type: integer
- *           default: 20
- *     responses:
- *       200:
- *         description: Paginated admin ticket list
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/TicketListResponse'
- *       403:
- *         description: Admin role required
- */
 router.get('/admin/tickets', authenticate, userLimiter, requirePolicy('ticket:admin-view-all'), auditLog({ action: 'ticket:admin-view-all' }), async (req, res) => {
   const { status, category, user_id, page = '1', limit = '20' } = req.query;
   if (page !== undefined && !/^\d+$/.test(page)) {
@@ -713,55 +604,9 @@ router.get('/admin/tickets', authenticate, userLimiter, requirePolicy('ticket:ad
   }
 });
 
-/**
- * @openapi
- * /api/support/tickets/{id}/comments:
- *   post:
- *     tags: [Support]
- *     summary: Add a comment to a support ticket
- *     description: Adds a comment/reply to an existing support ticket. Only the ticket owner or admin can comment. Cannot comment on closed tickets.
- *     security:
- *       - BearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: string
- *           format: uuid
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             $ref: '#/components/schemas/CreateCommentRequest'
- *     responses:
- *       201:
- *         description: Comment added
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/CommentResponse'
- *       403:
- *         description: Access denied
- *       404:
- *         description: Ticket not found
- *       409:
- *         description: Cannot comment on closed ticket
- */
-/**
- * @route POST /api/support/tickets/:id/comments
- * @desc Create a comment/reply on a support ticket
- * @access Authenticated (Ticket Owner or Admin)
- * @param {string} req.params.id - The UUID of the support ticket
- * @param {string} req.body.message - Comment content/message
- * @returns {object} 201 - Comment added successfully with comment details
- * @returns {object} 400 - Validation errors
- * @returns {object} 403 - Forbidden if user is not the ticket owner or admin
- * @returns {object} 404 - Support ticket not found
- * @returns {object} 409 - Cannot comment on a closed ticket
- * @returns {object} 500 - Internal server error
- */
+// ============================================================================
+// 8. ADD A COMMENT TO A TICKET
+// ============================================================================
 router.post('/tickets/:id/comments', authenticate, userLimiter, requirePolicy('ticket:add-comment', async (req) => {
   const { data: ticket } = await userDb(req)
     .from('support_tickets')
@@ -825,48 +670,8 @@ router.post('/tickets/:id/comments', authenticate, userLimiter, requirePolicy('t
 });
 
 // ============================================================================
-// 8. GET ALL COMMENTS/REPLIES FOR A TICKET (CUSTOMER OR DRIVER OWNER OR ADMIN)
+// 9. GET ALL COMMENTS/REPLIES FOR A TICKET
 // ============================================================================
-/**
- * @openapi
- * /api/support/tickets/{id}/comments:
- *   get:
- *     tags: [Support]
- *     summary: Get ticket comments
- *     description: Returns all comments for a support ticket. Only the ticket owner or admin can view.
- *     security:
- *       - BearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: string
- *           format: uuid
- *       - in: query
- *         name: sort
- *         schema:
- *           type: string
- *           enum: [asc, desc]
- *           default: desc
- *       - in: query
- *         name: limit
- *         schema:
- *           type: integer
- *           default: 100
- *       - in: query
- *         name: offset
- *         schema:
- *           type: integer
- *           default: 0
- *     responses:
- *       200:
- *         description: Array of comments
- *       403:
- *         description: Access denied
- *       404:
- *         description: Ticket not found
- */
 router.get('/tickets/:id/comments', authenticate, userLimiter, requirePolicy('ticket:view-comments', async (req) => {
   const { data: ticket } = await userDb(req)
     .from('support_tickets')
@@ -900,7 +705,6 @@ router.get('/tickets/:id/comments', authenticate, userLimiter, requirePolicy('ti
     const limitQuery = req.query.limit;
     const offsetQuery = req.query.offset;
 
-    // Reject empty or whitespace-only strings before conversion 
     if (typeof limitQuery === 'string' && limitQuery.trim() === '') {
       return res.status(400).json({ error: 'limit cannot be empty' });
     }
@@ -910,14 +714,6 @@ router.get('/tickets/:id/comments', authenticate, userLimiter, requirePolicy('ti
 
     const parsedLimit = limitQuery !== undefined ? Number(limitQuery) : 100;
     const parsedOffset = offsetQuery !== undefined ? Number(offsetQuery) : 0;
-
-    if (!Number.isFinite(parsedLimit) || !Number.isInteger(parsedLimit) || parsedLimit <= 0) {
-      return res.status(400).json({ error: 'limit must be a positive integer' });
-    }
-
-    if (!Number.isFinite(parsedOffset) || !Number.isInteger(parsedOffset) || parsedOffset < 0) {
-      return res.status(400).json({ error: 'offset must be a non-negative integer' });
-    }
 
     if (!Number.isFinite(parsedLimit) || !Number.isInteger(parsedLimit) || parsedLimit <= 0) {
       return res.status(400).json({ error: 'limit must be a positive integer' });
@@ -952,5 +748,3 @@ router.get('/tickets/:id/comments', authenticate, userLimiter, requirePolicy('ti
 });
 
 export default router;
-
-// Resolves #2055: Load-based ticket assignment
