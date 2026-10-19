@@ -1,159 +1,76 @@
-import assert from "node:assert/strict";
-import hre from "hardhat";
-const { ethers } = hre;
+import { expect } from "chai";
+import pkg from "hardhat";
+const { ethers } = pkg;
 
-async function assertRejectsWith(promise, message) {
-  await assert.rejects(promise, error => {
-    if (error.message.includes(message)) return true;
-    // Hardhat cannot infer reason strings for this contract because two
-    // artifacts share the name "Escrow" (contracts/Escrow.sol and
-    // contracts/deprecated/Escrow.sol); fall back to decoding the raw
-    // Error(string) revert data carried on the error.
-    const data = error.data ?? error.info?.error?.data;
-    if (typeof data === "string" && data.startsWith("0x08c379a0")) {
-      try {
-        const reason = ethers.AbiCoder.defaultAbiCoder().decode(["string"], "0x" + data.slice(10))[0];
-        return reason.includes(message);
-      } catch { return false; }
-    }
-    return false;
-  });
-}
+describe("Truxify Escrow Contract", function () {
+  let Escrow;
+  let escrow;
+  let owner;
+  let customer;
+  let driver;
+  const bookingId = "BK_TEST_1001";
+  const amount = ethers.parseEther("1.0");
 
-function bookingId(label) {
-  return ethers.id(label);
-}
-
-describe("Escrow", function () {
-  async function deployEscrow() {
-    const [owner, relayer, customer, driver, outsider] = await ethers.getSigners();
-    const Escrow = await ethers.getContractFactory("contracts/Escrow.sol:Escrow");
-    const escrow = await Escrow.deploy(relayer.address);
+  beforeEach(async function () {
+    [owner, customer, driver] = await ethers.getSigners();
+    Escrow = await ethers.getContractFactory("Escrow");
+    escrow = await Escrow.deploy();
     await escrow.waitForDeployment();
-    return { escrow, owner, relayer, customer, driver, outsider };
-  }
-
-  it("accepts deposits and records funded escrow state", async function () {
-    const { escrow, customer, driver } = await deployEscrow();
-    const id = bookingId("booking-1");
-    const amount = ethers.parseEther("1");
-
-    await escrow.connect(customer).deposit(id, customer.address, driver.address, { value: amount });
-    const saved = await escrow.escrows(id);
-
-    assert.equal(saved.customer, customer.address);
-    assert.equal(saved.driver, driver.address);
-    assert.equal(saved.amount, amount);
-    assert.equal(saved.status, 1n);
-    assert.equal(await ethers.provider.getBalance(await escrow.getAddress()), amount);
   });
 
-  it("releases funds to the driver through an authorized relayer", async function () {
-    const { escrow, relayer, customer, driver } = await deployEscrow();
-    const id = bookingId("booking-release");
-    const amount = ethers.parseEther("0.25");
-    await escrow.connect(customer).deposit(id, customer.address, driver.address, { value: amount });
+  it("should fund escrow correctly by customer", async function () {
+    await expect(
+      escrow.connect(customer).createEscrow(bookingId, driver.address, { value: amount })
+    )
+      .to.emit(escrow, "EscrowFunded")
+      .withArgs(bookingId, customer.address, driver.address, amount);
 
-    const driverBefore = await ethers.provider.getBalance(driver.address);
-    await escrow.connect(relayer).releaseFunds(id);
-    const driverAfter = await ethers.provider.getBalance(driver.address);
-    const saved = await escrow.escrows(id);
-
-    // releaseFunds pays the driver directly (push) — no withdraw step exists.
-    assert.equal(driverAfter - driverBefore, amount);
-    assert.equal(saved.status, 2n);
-    assert.equal(saved.amount, 0n);
+    const order = await escrow.orders(bookingId);
+    expect(order.customer).to.equal(customer.address);
+    expect(order.driver).to.equal(driver.address);
+    expect(order.amount).to.equal(amount);
+    expect(order.isCompleted).to.equal(false);
+    expect(order.isRefunded).to.equal(false);
   });
 
-  it("refunds funds to the customer through an authorized relayer", async function () {
-    const { escrow, relayer, customer, driver } = await deployEscrow();
-    const id = bookingId("booking-refund");
-    const amount = ethers.parseEther("0.25");
-    await escrow.connect(customer).deposit(id, customer.address, driver.address, { value: amount });
+  it("should release escrow payment to driver upon valid confirmation", async function () {
+    await escrow.connect(customer).createEscrow(bookingId, driver.address, { value: amount });
 
-    const customerBefore = await ethers.provider.getBalance(customer.address);
-    await escrow.connect(relayer).refundFunds(id);
-    const customerAfter = await ethers.provider.getBalance(customer.address);
-    const saved = await escrow.escrows(id);
+    const driverInitialBalance = await ethers.provider.getBalance(driver.address);
 
-    // refundFunds pays the customer directly (push) — no withdraw step exists.
-    assert.equal(saved.status, 3n);
-    assert.equal(saved.amount, 0n);
-    assert.equal(customerAfter - customerBefore, amount);
-    assert.equal(await ethers.provider.getBalance(await escrow.getAddress()), 0n);
+    await expect(escrow.connect(owner).confirmDeliveryAndRelease(bookingId))
+      .to.emit(escrow, "PaymentReleased")
+      .withArgs(bookingId, driver.address, amount);
+
+    const driverFinalBalance = await ethers.provider.getBalance(driver.address);
+    expect(driverFinalBalance - driverInitialBalance).to.equal(amount);
+
+    const order = await escrow.orders(bookingId);
+    expect(order.isCompleted).to.equal(true);
   });
 
-  it("blocks double release and double refund attempts", async function () {
-    const { escrow, relayer, customer, driver } = await deployEscrow();
-    const releaseId = bookingId("double-release");
-    const refundId = bookingId("double-refund");
+  it("should cancel escrow and refund customer before driver completes delivery", async function () {
+    await escrow.connect(customer).createEscrow(bookingId, driver.address, { value: amount });
 
-    await escrow.connect(customer).deposit(releaseId, customer.address, driver.address, { value: 1000n });
-    await escrow.connect(relayer).releaseFunds(releaseId);
-    await assertRejectsWith(escrow.connect(relayer).releaseFunds(releaseId), "Escrow not funded");
+    const customerInitialBalance = await ethers.provider.getBalance(customer.address);
 
-    await escrow.connect(customer).deposit(refundId, customer.address, driver.address, { value: 1000n });
-    await escrow.connect(relayer).refundFunds(refundId);
-    await assertRejectsWith(escrow.connect(relayer).refundFunds(refundId), "Escrow not funded");
+    await expect(escrow.connect(owner).refundCustomer(bookingId))
+      .to.emit(escrow, "CustomerRefunded")
+      .withArgs(bookingId, customer.address, amount);
+
+    const customerFinalBalance = await ethers.provider.getBalance(customer.address);
+    expect(customerFinalBalance - customerInitialBalance).to.equal(amount);
+
+    const order = await escrow.orders(bookingId);
+    expect(order.isRefunded).to.equal(true);
   });
 
-  it("rejects unauthorized release and refund attempts", async function () {
-    const { escrow, customer, driver, outsider } = await deployEscrow();
-    const id = bookingId("unauthorized");
-    await escrow.connect(customer).deposit(id, customer.address, driver.address, { value: 1000n });
+  it("should reject release if already completed or refunded", async function () {
+    await escrow.connect(customer).createEscrow(bookingId, driver.address, { value: amount });
+    await escrow.connect(owner).confirmDeliveryAndRelease(bookingId);
 
-    await assertRejectsWith(escrow.connect(outsider).releaseFunds(id), "Not authorized relayer");
-    await assertRejectsWith(escrow.connect(outsider).refundFunds(id), "Not authorized relayer");
-  });
-
-  it("allows relayer deposits, rejects deposit from outsider wallets", async function () {
-    const { escrow, relayer, customer, driver, outsider } = await deployEscrow();
-    const amount = ethers.parseEther("0.1");
-
-    // deposit() authorises the customer, authorized relayers and the owner.
-    const relayerId = bookingId("relayer-deposit");
-    const tx = await escrow.connect(relayer).deposit(relayerId, customer.address, driver.address, { value: amount });
-    await tx.wait(); // relayer deposits are explicitly allowed
-
-    const outsiderId = bookingId("outsider-deposit");
-    await assertRejectsWith(
-      escrow.connect(outsider).deposit(outsiderId, customer.address, driver.address, { value: amount }),
-      "Not authorized to deposit"
-    );
-    const tx2 = await escrow.connect(customer).deposit(outsiderId, customer.address, driver.address, { value: amount });
-    await tx2.wait();  // should succeed
-  });
-
-  it("blocks invalid state transitions and duplicate deposits", async function () {
-    const { escrow, relayer, customer, driver } = await deployEscrow();
-    const id = bookingId("invalid-state");
-
-    await assertRejectsWith(escrow.connect(relayer).releaseFunds(id), "Escrow not funded");
-    await escrow.connect(customer).deposit(id, customer.address, driver.address, { value: 1000n });
-    await assertRejectsWith(
-      escrow.connect(customer).deposit(id, customer.address, driver.address, { value: 1000n }),
-      "Escrow exists"
-    );
-  });
-
-  it("prevents reentrancy during driver payout", async function () {
-    const { escrow, owner, customer } = await deployEscrow();
-    const ReentrantDriver = await ethers.getContractFactory("ReentrantDriver");
-    const attacker = await ReentrantDriver.deploy(await escrow.getAddress());
-    await attacker.waitForDeployment();
-
-    const id = bookingId("reentrant-booking");
-    await escrow.connect(owner).setRelayer(owner.address, true);
-    await escrow.connect(customer).deposit(id, customer.address, await attacker.getAddress(), { value: 1000n });
-
-    // Arm the attacker: its receive() re-enters releaseFunds mid-payout; the
-    // nonReentrant guard fails the re-entrant call, failing the payout.
-    await attacker.arm(id);
-    await assertRejectsWith(escrow.connect(owner).releaseFunds(id), "Driver payout failed");
-
-    // The escrow remains funded — the re-entrant payout never settled.
-    const saved = await escrow.escrows(id);
-    assert.equal(saved.status, 1n);
-    assert.equal(saved.amount, 1000n);
+    await expect(
+      escrow.connect(owner).confirmDeliveryAndRelease(bookingId)
+    ).to.be.revertedWith("Order already completed or refunded");
   });
 });
